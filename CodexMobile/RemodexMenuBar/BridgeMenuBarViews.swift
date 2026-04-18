@@ -112,6 +112,10 @@ struct BridgeMenuBarContentView: View {
                 .font(.system(size: 11, weight: .regular))
                 .foregroundStyle(.secondary)
 
+            if let localRelayURL = store.localRelayURL, !localRelayURL.isEmpty {
+                LabelValueRow(label: "Local Relay", value: localRelayURL)
+            }
+
             TextField("ws://localhost:9000/relay", text: $relayDraft)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12, weight: .regular, design: .monospaced))
@@ -131,6 +135,16 @@ struct BridgeMenuBarContentView: View {
                     relayDraft = ""
                     store.clearRelayOverride()
                 }
+            }
+
+            HStack(spacing: 6) {
+                CompactActionButton("Start Local", style: .primary) {
+                    store.startLocalRelay()
+                }
+                CompactActionButton("Stop Local", style: .destructive) {
+                    store.stopLocalRelay()
+                }
+                .disabled(!store.isLocalRelayRunning)
             }
         }
         .padding(12)
@@ -167,6 +181,12 @@ struct BridgeMenuBarContentView: View {
                     CompactActionButton("Update", style: .primary) {
                         store.updateBridgePackage()
                     }
+                }
+            }
+
+            HStack(spacing: 6) {
+                CompactActionButton("Quit", style: .destructive) {
+                    store.quitApp()
                 }
             }
         }

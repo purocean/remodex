@@ -51,6 +51,63 @@ enum SidebarMacNicknameStore {
     }
 }
 
+enum RelayURLPresetStore {
+    private static let keyPrefix = "codex.relayURLPresets."
+
+    static func presets(for deviceId: String?) -> [String] {
+        guard let storageKey = storageKey(for: deviceId),
+              let rawValues = UserDefaults.standard.array(forKey: storageKey) as? [String] else {
+            return []
+        }
+
+        var seen = Set<String>()
+        return rawValues.compactMap { normalizeRelayURL($0) }.filter { seen.insert($0).inserted }
+    }
+
+    static func savePreset(_ relayURL: String, for deviceId: String?) {
+        guard let storageKey = storageKey(for: deviceId),
+              let normalized = normalizeRelayURL(relayURL) else {
+            return
+        }
+
+        var updated = presets(for: deviceId)
+        updated.removeAll { $0 == normalized }
+        updated.insert(normalized, at: 0)
+        UserDefaults.standard.set(updated, forKey: storageKey)
+    }
+
+    static func deletePreset(_ relayURL: String, for deviceId: String?) {
+        guard let storageKey = storageKey(for: deviceId),
+              let normalized = normalizeRelayURL(relayURL) else {
+            return
+        }
+
+        let updated = presets(for: deviceId).filter { $0 != normalized }
+        if updated.isEmpty {
+            UserDefaults.standard.removeObject(forKey: storageKey)
+        } else {
+            UserDefaults.standard.set(updated, forKey: storageKey)
+        }
+    }
+
+    static func normalizeRelayURL(_ relayURL: String) -> String? {
+        let trimmed = relayURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private static func storageKey(for deviceId: String?) -> String? {
+        guard let deviceId = deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !deviceId.isEmpty else {
+            return nil
+        }
+
+        return keyPrefix + deviceId
+    }
+}
+
 extension CodexService {
     // Builds the minimal pair summary shown by Home and Settings so both surfaces stay in sync.
     var trustedPairPresentation: CodexTrustedPairPresentation? {
@@ -73,6 +130,41 @@ extension CodexService {
             systemName: nickname.isEmpty ? nil : systemName,
             detail: trustedPairDetail(displayName: macName, fingerprint: macFingerprint)
         )
+    }
+
+    var editableRelayURL: String? {
+        if let relayURL = normalizedRelayURL {
+            return relayURL
+        }
+
+        guard let relayURL = preferredTrustedMacRecord?.relayURL?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !relayURL.isEmpty else {
+            return nil
+        }
+        return relayURL
+    }
+
+    func updatePreferredRelayURL(_ relayURL: String) {
+        guard let normalizedRelayURL = RelayURLPresetStore.normalizeRelayURL(relayURL) else {
+            return
+        }
+
+        SecureStore.writeString(normalizedRelayURL, for: CodexSecureKeys.relayUrl)
+        self.relayUrl = normalizedRelayURL
+
+        if let preferredTrustedMacDeviceId,
+           var trustedMac = trustedMacRegistry.records[preferredTrustedMacDeviceId] {
+            trustedMac.relayURL = normalizedRelayURL
+            trustedMac.lastUsedAt = Date()
+            trustedMacRegistry.records[preferredTrustedMacDeviceId] = trustedMac
+            SecureStore.writeCodable(trustedMacRegistry, for: CodexSecureKeys.trustedMacRegistry)
+        }
+
+        if !isConnected, let trustedMac = preferredTrustedMacRecord {
+            secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
+            secureConnectionState = .liveSessionUnresolved
+        }
     }
 }
 

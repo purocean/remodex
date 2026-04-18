@@ -12,6 +12,8 @@ struct SettingsView: View {
 
     @AppStorage("codex.appFontStyle") private var appFontStyleRawValue = AppFont.defaultStoredStyleRawValue
     @State private var isShowingMacNameSheet = false
+    @State private var relayURLDraft = ""
+    @State private var switchingRelayURL: String?
 
     private let runtimeAutoValue = "__AUTO__"
     private let runtimeNormalValue = "__NORMAL__"
@@ -50,6 +52,12 @@ struct SettingsView: View {
             }
             await subscriptions.bootstrap()
         }
+        .task(id: relayURLSeedFingerprint) {
+            guard relayURLDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return
+            }
+            relayURLDraft = codex.editableRelayURL ?? ""
+        }
     }
 
     private var appFontStyleBinding: Binding<AppFont.Style> {
@@ -69,6 +77,22 @@ struct SettingsView: View {
                 }
             }
         )
+    }
+
+    private var relayURLSeedFingerprint: String {
+        "\(codex.trustedPairPresentation?.deviceId ?? "none")|\(codex.editableRelayURL ?? "")"
+    }
+
+    private var currentRelayDeviceId: String? {
+        codex.trustedPairPresentation?.deviceId
+    }
+
+    private var currentRelayURLPresets: [String] {
+        RelayURLPresetStore.presets(for: currentRelayDeviceId)
+    }
+
+    private var currentNormalizedRelayURLDraft: String? {
+        RelayURLPresetStore.normalizeRelayURL(relayURLDraft)
     }
 
     // MARK: - Runtime defaults
@@ -146,10 +170,70 @@ struct SettingsView: View {
                         isShowingMacNameSheet = true
                     }
                 )
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Relay URL")
+                        .font(AppFont.caption(weight: .semibold))
+                        .foregroundStyle(.secondary)
+
+                    TextField("ws://192.168.1.10:9000/relay", text: $relayURLDraft)
+                        .textInputAutocapitalization(.never)
+                        .disableAutocorrection(true)
+                        .font(AppFont.subheadline())
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 11)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(Color(.secondarySystemFill))
+                        )
+
+                    Text("Use this to switch the paired Mac between different relay addresses, such as LAN IP, Tailscale, or another private endpoint.")
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary)
+
+                    HStack(spacing: 10) {
+                        SettingsButton("Apply URL", isLoading: switchingRelayURL == "__manual__") {
+                            applyRelayURLDraft()
+                        }
+                        .disabled(currentNormalizedRelayURLDraft == nil)
+
+                        SettingsButton("Save Preset") {
+                            saveCurrentRelayURLPreset()
+                        }
+                        .disabled(currentNormalizedRelayURLDraft == nil)
+                    }
+                }
+
+                if !currentRelayURLPresets.isEmpty {
+                    Divider()
+
+                    Text("Saved URLs")
+                        .font(AppFont.caption(weight: .semibold))
+                        .foregroundStyle(.secondary)
+
+                    ForEach(currentRelayURLPresets, id: \.self) { relayURL in
+                        SettingsRelayURLPresetRow(
+                            relayURL: relayURL,
+                            isActive: relayURL == codex.editableRelayURL,
+                            isSwitching: switchingRelayURL == relayURL,
+                            onUse: {
+                                switchToRelayURLPreset(relayURL)
+                            },
+                            onDelete: {
+                                deleteRelayURLPreset(relayURL)
+                            }
+                        )
+                    }
+                }
             } else {
                 Text("No paired Mac")
                     .font(AppFont.subheadline(weight: .semibold))
                     .foregroundStyle(.primary)
+                Text("Pair once with QR first, then you can edit and save alternate relay URLs here.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
             }
 
             if connectionPhaseShowsProgress {
@@ -159,6 +243,15 @@ struct SettingsView: View {
                         .font(AppFont.caption())
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            if let switchingRelayURL,
+               !switchingRelayURL.isEmpty {
+                Text(switchingRelayURL == "__manual__"
+                     ? "Switching relay URL..."
+                     : "Switching to \(switchingRelayURL)...")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
             }
 
             if case .retrying(_, let message) = codex.connectionRecoveryState,
@@ -248,6 +341,92 @@ struct SettingsView: View {
         Task { @MainActor in
             await codex.disconnect()
             codex.clearSavedRelaySession()
+        }
+    }
+
+    private func applyRelayURLDraft() {
+        guard let relayURL = currentNormalizedRelayURLDraft else {
+            return
+        }
+
+        HapticFeedback.shared.triggerImpactFeedback()
+        switchingRelayURL = "__manual__"
+
+        Task { @MainActor in
+            defer { switchingRelayURL = nil }
+            await applyRelayURL(relayURL)
+        }
+    }
+
+    private func saveCurrentRelayURLPreset() {
+        guard let relayURL = currentNormalizedRelayURLDraft else {
+            return
+        }
+
+        HapticFeedback.shared.triggerImpactFeedback()
+        RelayURLPresetStore.savePreset(relayURL, for: currentRelayDeviceId)
+        relayURLDraft = relayURL
+    }
+
+    private func switchToRelayURLPreset(_ relayURL: String) {
+        HapticFeedback.shared.triggerImpactFeedback()
+        switchingRelayURL = relayURL
+
+        Task { @MainActor in
+            defer { switchingRelayURL = nil }
+            relayURLDraft = relayURL
+            await applyRelayURL(relayURL)
+        }
+    }
+
+    private func deleteRelayURLPreset(_ relayURL: String) {
+        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+        RelayURLPresetStore.deletePreset(relayURL, for: currentRelayDeviceId)
+    }
+
+    private func applyRelayURL(_ relayURL: String) async {
+        guard let normalizedRelayURL = RelayURLPresetStore.normalizeRelayURL(relayURL) else {
+            return
+        }
+
+        codex.lastErrorMessage = nil
+        RelayURLPresetStore.savePreset(normalizedRelayURL, for: currentRelayDeviceId)
+        codex.updatePreferredRelayURL(normalizedRelayURL)
+        relayURLDraft = normalizedRelayURL
+
+        guard codex.isConnected else {
+            return
+        }
+
+        await codex.disconnect()
+
+        do {
+            let reconnectURL: String?
+            if codex.hasTrustedMacReconnectCandidate {
+                let resolved = try await codex.resolveTrustedMacSession()
+                reconnectURL = "\(normalizedRelayURL)/\(resolved.sessionId)"
+            } else if let sessionId = codex.normalizedRelaySessionId {
+                reconnectURL = "\(normalizedRelayURL)/\(sessionId)"
+            } else {
+                reconnectURL = nil
+            }
+
+            guard let reconnectURL else {
+                codex.lastErrorMessage = "Could not resolve the relay session for the selected URL."
+                return
+            }
+
+            try await codex.connect(
+                serverURL: reconnectURL,
+                token: "",
+                role: "iphone"
+            )
+        } catch is CancellationError {
+            return
+        } catch {
+            if codex.lastErrorMessage?.isEmpty ?? true {
+                codex.lastErrorMessage = codex.userFacingConnectFailureMessage(error)
+            }
         }
     }
 
@@ -980,6 +1159,56 @@ private struct SettingsTrustedMacCard: View {
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+private struct SettingsRelayURLPresetRow: View {
+    let relayURL: String
+    let isActive: Bool
+    let isSwitching: Bool
+    let onUse: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(relayURL)
+                        .font(AppFont.subheadline(weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+
+                    Text(isActive ? "Current relay URL" : "Saved preset")
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 8)
+
+                if isActive {
+                    SettingsStatusPill(label: "Active")
+                }
+            }
+
+            HStack(spacing: 10) {
+                SettingsButton(isActive ? "Apply Again" : "Use This", isLoading: isSwitching) {
+                    onUse()
+                }
+
+                SettingsButton("Delete", role: .destructive) {
+                    onDelete()
+                }
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(.secondarySystemFill).opacity(0.45))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+        )
     }
 }
 

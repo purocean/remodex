@@ -31,6 +31,7 @@ final class BridgeMenuBarStore: ObservableObject {
     @Published var updateState = BridgePackageUpdateState.empty
     @Published var cliAvailability: BridgeCLIAvailability = .checking
     @Published var relayOverride: String
+    @Published var localRelayURL: String?
     @Published var isRefreshing = false
     @Published var isPerformingAction = false
     @Published var transientMessage = ""
@@ -99,6 +100,46 @@ final class BridgeMenuBarStore: ObservableObject {
         }
     }
 
+    func startLocalRelay() {
+        runAction(successMessage: "Local relay started.") {
+            let relayURL = try await self.service.startLocalRelay()
+            self.localRelayURL = relayURL
+            self.relayOverride = relayURL
+            UserDefaults.standard.set(relayURL, forKey: Self.relayOverrideKey)
+            try await self.refreshAfterAction()
+        }
+    }
+
+    func stopLocalRelay() {
+        runAction(successMessage: "Local relay stopped.") {
+            self.service.stopLocalRelay()
+            self.localRelayURL = nil
+            try? await self.service.stopBridge(relayOverride: self.effectiveRelayOverride)
+            try await self.refreshAfterAction()
+        }
+    }
+
+    func quitApp() {
+        guard !isPerformingAction else {
+            return
+        }
+
+        isPerformingAction = true
+        transientMessage = ""
+        errorMessage = ""
+
+        Task {
+            defer {
+                self.isPerformingAction = false
+            }
+
+            try? await self.service.stopBridge(relayOverride: self.effectiveRelayOverride)
+            self.service.stopLocalRelay()
+            self.localRelayURL = nil
+            NSApplication.shared.terminate(nil)
+        }
+    }
+
     func resumeLastThread() {
         runAction(successMessage: "Ultimo thread riaperto in Codex.") {
             try await self.requireCLIAvailability()
@@ -152,6 +193,10 @@ final class BridgeMenuBarStore: ObservableObject {
         relayOverride.isEmpty ? nil : relayOverride
     }
 
+    var isLocalRelayRunning: Bool {
+        service.isLocalRelayRunning
+    }
+
     var isCLIAvailable: Bool {
         cliAvailability.isAvailable
     }
@@ -174,6 +219,7 @@ final class BridgeMenuBarStore: ObservableObject {
         guard cliAvailability.isAvailable else {
             snapshot = nil
             updateState = .empty
+            localRelayURL = service.activeLocalRelayURL
             return
         }
 
@@ -251,6 +297,7 @@ final class BridgeMenuBarStore: ObservableObject {
         do {
             let snapshot = try await service.loadSnapshot(relayOverride: effectiveRelayOverride)
             self.snapshot = snapshot
+            self.localRelayURL = service.activeLocalRelayURL
             self.errorMessage = ""
             self.updateState = await resolveUpdateState(installedVersion: snapshot.currentVersion)
             return snapshot
@@ -259,6 +306,7 @@ final class BridgeMenuBarStore: ObservableObject {
                 snapshot = nil
                 updateState = .empty
             }
+            localRelayURL = service.activeLocalRelayURL
             errorMessage = error.localizedDescription
             throw error
         }

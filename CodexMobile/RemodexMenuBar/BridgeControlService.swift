@@ -5,6 +5,7 @@
 // Depends on: Foundation, BridgeControlModels
 
 import Foundation
+import Darwin
 
 struct BridgeCLIInvocation {
     let nodePath: String
@@ -102,6 +103,8 @@ final class BridgeControlService {
         .appendingPathComponent("Library", isDirectory: true)
         .appendingPathComponent("LaunchAgents", isDirectory: true)
         .appendingPathComponent("com.remodex.bridge.plist")
+    private var localRelayProcess: Process?
+    private var localRelayURL: String?
 
     init(runner: ShellCommandRunner = ShellCommandRunner()) {
         self.runner = runner
@@ -174,6 +177,93 @@ final class BridgeControlService {
 
     func updateBridgePackage() async throws {
         _ = try await runner.run(command: "npm install -g remodex@latest")
+    }
+
+    func startLocalRelay() async throws -> String {
+        if let localRelayProcess, localRelayProcess.isRunning, let localRelayURL {
+            return localRelayURL
+        }
+
+        let repoRootURL = developmentRepoRootURL()
+        let launcherURL = repoRootURL.appendingPathComponent("run-local-remodex.sh")
+        guard fileManager.isExecutableFile(atPath: launcherURL.path) else {
+            throw BridgeControlError.commandFailed(
+                command: launcherURL.path,
+                message: "Could not find run-local-remodex.sh in the current checkout."
+            )
+        }
+
+        guard let hostname = preferredLANIPAddress() else {
+            throw BridgeControlError.commandFailed(
+                command: launcherURL.path,
+                message: "Could not determine a LAN IP address for this Mac."
+            )
+        }
+
+        let relayURL = "ws://\(hostname):9000/relay"
+        let logsDirectoryURL = defaultStateDirectory.appendingPathComponent("menu-bar-logs", isDirectory: true)
+        try fileManager.createDirectory(at: logsDirectoryURL, withIntermediateDirectories: true)
+
+        let stdoutURL = logsDirectoryURL.appendingPathComponent("local-relay.stdout.log")
+        let stderrURL = logsDirectoryURL.appendingPathComponent("local-relay.stderr.log")
+        if !fileManager.fileExists(atPath: stdoutURL.path) {
+            fileManager.createFile(atPath: stdoutURL.path, contents: nil)
+        }
+        if !fileManager.fileExists(atPath: stderrURL.path) {
+            fileManager.createFile(atPath: stderrURL.path, contents: nil)
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-lc", "exec ./run-local-remodex.sh --hostname \(shellQuoted(hostname))"]
+        process.currentDirectoryURL = repoRootURL
+        process.environment = ProcessInfo.processInfo.environment
+        process.standardOutput = try FileHandle(forWritingTo: stdoutURL)
+        process.standardError = try FileHandle(forWritingTo: stderrURL)
+        process.terminationHandler = { [weak self] _ in
+            Task { @MainActor in
+                self?.localRelayProcess = nil
+                self?.localRelayURL = nil
+            }
+        }
+
+        try process.run()
+        localRelayProcess = process
+        localRelayURL = relayURL
+
+        do {
+            try await waitForLocalRelayHealthcheck()
+        } catch {
+            stopLocalRelay()
+            throw error
+        }
+
+        return relayURL
+    }
+
+    func stopLocalRelay() {
+        guard let localRelayProcess else {
+            localRelayURL = nil
+            return
+        }
+
+        if localRelayProcess.isRunning {
+            localRelayProcess.terminate()
+        }
+
+        self.localRelayProcess = nil
+        self.localRelayURL = nil
+    }
+
+    var isLocalRelayRunning: Bool {
+        localRelayProcess?.isRunning == true
+    }
+
+    var activeLocalRelayURL: String? {
+        guard isLocalRelayRunning else {
+            return nil
+        }
+        return localRelayURL
     }
 
     func fetchLatestPackageVersion() async -> Result<String, Error> {
@@ -514,6 +604,87 @@ final class BridgeControlService {
         return [
             "REMODEX_RELAY": relayOverride.trimmingCharacters(in: .whitespacesAndNewlines),
         ]
+    }
+
+    private func developmentRepoRootURL() -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+    }
+
+    private func waitForLocalRelayHealthcheck() async throws {
+        for _ in 0..<20 {
+            if let localRelayProcess, !localRelayProcess.isRunning {
+                throw BridgeControlError.commandFailed(
+                    command: "./run-local-remodex.sh",
+                    message: "The local relay process exited before becoming healthy."
+                )
+            }
+
+            if let probeResult = try? await runner.run(command: "curl --silent --fail http://127.0.0.1:9000/health"),
+               !probeResult.stdout.isEmpty || probeResult.exitCode == 0 {
+                return
+            }
+
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+
+        throw BridgeControlError.commandFailed(
+            command: "./run-local-remodex.sh",
+            message: "The local relay did not become healthy on port 9000."
+        )
+    }
+
+    private func preferredLANIPAddress() -> String? {
+        var addressList: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addressList) == 0, let firstAddress = addressList else {
+            return nil
+        }
+        defer { freeifaddrs(addressList) }
+
+        var fallback: String?
+        var pointer = firstAddress
+        while true {
+            let interface = pointer.pointee
+            let flags = Int32(interface.ifa_flags)
+            let isUp = (flags & IFF_UP) != 0
+            let isRunning = (flags & IFF_RUNNING) != 0
+            let isLoopback = (flags & IFF_LOOPBACK) != 0
+
+            if isUp,
+               isRunning,
+               !isLoopback,
+               let address = interface.ifa_addr,
+               address.pointee.sa_family == UInt8(AF_INET),
+               let name = String(validatingUTF8: interface.ifa_name) {
+                var hostnameBuffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                let result = getnameinfo(
+                    address,
+                    socklen_t(address.pointee.sa_len),
+                    &hostnameBuffer,
+                    socklen_t(hostnameBuffer.count),
+                    nil,
+                    0,
+                    NI_NUMERICHOST
+                )
+
+                if result == 0 {
+                    let addressString = String(cString: hostnameBuffer)
+                    if name == "en0" {
+                        return addressString
+                    }
+                    fallback = fallback ?? addressString
+                }
+            }
+
+            guard let next = interface.ifa_next else {
+                break
+            }
+            pointer = next
+        }
+
+        return fallback
     }
 }
 
