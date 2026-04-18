@@ -68,6 +68,7 @@ private struct CachedSubscriptionState: Codable, Equatable {
 @MainActor
 @Observable
 final class SubscriptionService {
+    private static let forceLocalProAccess = true
     private static let cachedStateDefaultsKey = "codex.subscription.cachedState"
     private static let freeSendCountDefaultsKey = "codex.subscription.freeSendCount"
     private static let freeSendLimit = 5
@@ -82,7 +83,7 @@ final class SubscriptionService {
     private(set) var customerInfo: CustomerInfo?
     private(set) var currentOffering: Offering?
     private(set) var packageOptions: [SubscriptionPackageOption] = []
-    private(set) var hasProAccess = false
+    private(set) var hasProAccess = Self.forceLocalProAccess
     private(set) var freeSendCount = 0
     private(set) var latestPurchaseDate: Date?
     private(set) var willRenew = false
@@ -95,7 +96,11 @@ final class SubscriptionService {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         restoreCachedStateIfAvailable()
-        startCustomerInfoObserverIfConfigured()
+        if Self.forceLocalProAccess {
+            applyForcedLocalProState()
+        } else {
+            startCustomerInfoObserverIfConfigured()
+        }
     }
 
     deinit {
@@ -126,6 +131,11 @@ final class SubscriptionService {
 
     // Bootstraps subscription state once at launch or from the recovery retry action.
     func bootstrap() async {
+        if Self.forceLocalProAccess {
+            applyForcedLocalProState()
+            return
+        }
+
         guard !isBootstrapping else {
             return
         }
@@ -159,6 +169,11 @@ final class SubscriptionService {
 
     // Refreshes the current subscription state without re-entering the blocking bootstrap UI.
     func refreshCustomerInfoSilently() async {
+        if Self.forceLocalProAccess {
+            applyForcedLocalProState()
+            return
+        }
+
         guard !isBootstrapping, bootstrapState != .loading else {
             return
         }
@@ -179,6 +194,11 @@ final class SubscriptionService {
 
     // Reads the current RevenueCat offerings and normalizes the package list for SwiftUI.
     func loadOfferings() async {
+        if Self.forceLocalProAccess {
+            applyForcedLocalProState()
+            return
+        }
+
         startCustomerInfoObserverIfConfigured()
         isLoading = true
         lastErrorMessage = nil
@@ -190,6 +210,11 @@ final class SubscriptionService {
 
     // Starts a purchase flow for the selected package and refreshes entitlements on success.
     func purchase(_ option: SubscriptionPackageOption) async {
+        if Self.forceLocalProAccess {
+            applyForcedLocalProState()
+            return
+        }
+
         guard !isPurchasing else {
             return
         }
@@ -225,6 +250,11 @@ final class SubscriptionService {
 
     // Restores store purchases and then re-checks the Pro entitlement state.
     func restorePurchases() async {
+        if Self.forceLocalProAccess {
+            applyForcedLocalProState()
+            return
+        }
+
         guard !isRestoring else {
             return
         }
@@ -252,6 +282,23 @@ final class SubscriptionService {
 }
 
 private extension SubscriptionService {
+    func applyForcedLocalProState() {
+        customerInfo = nil
+        currentOffering = nil
+        packageOptions = []
+        hasProAccess = true
+        hasCachedOptimisticAccess = true
+        latestPurchaseDate = nil
+        willRenew = false
+        managementURL = nil
+        isLoading = false
+        isPurchasing = false
+        isRestoring = false
+        lastErrorMessage = nil
+        bootstrapState = .ready
+        persistCachedState()
+    }
+
     func startCustomerInfoObserverIfConfigured() {
         guard customerInfoUpdatesTask == nil, Purchases.isConfigured else {
             return
@@ -314,6 +361,11 @@ private extension SubscriptionService {
     // Rehydrates the last known subscription snapshot so launch and foreground recovery are local-first.
     func restoreCachedStateIfAvailable() {
         freeSendCount = defaults.integer(forKey: Self.freeSendCountDefaultsKey)
+        if Self.forceLocalProAccess {
+            applyForcedLocalProState()
+            return
+        }
+
         guard let data = defaults.data(forKey: Self.cachedStateDefaultsKey),
               let cachedState = try? JSONDecoder().decode(CachedSubscriptionState.self, from: data) else {
             return
