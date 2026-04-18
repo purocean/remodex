@@ -11,6 +11,9 @@ import SwiftUI
 struct BridgeMenuBarContentView: View {
     @ObservedObject var store: BridgeMenuBarStore
     @State private var relayDraft = ""
+    @State private var localHostnameDraft = ""
+    @State private var localBindHostDraft = ""
+    @State private var localPortDraft = ""
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -34,9 +37,21 @@ struct BridgeMenuBarContentView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .task {
             relayDraft = store.relayOverride
+            localHostnameDraft = store.localRelayHostname
+            localBindHostDraft = store.localRelayBindHost
+            localPortDraft = store.localRelayPort
         }
         .onChange(of: store.relayOverride) { _, newValue in
             relayDraft = newValue
+        }
+        .onChange(of: store.localRelayHostname) { _, newValue in
+            localHostnameDraft = newValue
+        }
+        .onChange(of: store.localRelayBindHost) { _, newValue in
+            localBindHostDraft = newValue
+        }
+        .onChange(of: store.localRelayPort) { _, newValue in
+            localPortDraft = newValue
         }
     }
 
@@ -137,8 +152,44 @@ struct BridgeMenuBarContentView: View {
                 }
             }
 
+            Divider()
+
+            sectionTitle("Local Relay Launch")
+
+            Text("Set the advertised host explicitly when you want the QR and saved URL to use a specific IP, such as a Tailscale address.")
+                .font(.system(size: 11, weight: .regular))
+                .foregroundStyle(.secondary)
+
+            TextField("Advertised Host, e.g. 100.65.103.101", text: $localHostnameDraft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color(nsColor: .textBackgroundColor).opacity(0.82), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                )
+
+            HStack(spacing: 8) {
+                localRelayField(title: "Bind Host", text: $localBindHostDraft, placeholder: "0.0.0.0")
+                localRelayField(title: "Port", text: $localPortDraft, placeholder: "9000")
+            }
+
             HStack(spacing: 6) {
+                CompactActionButton("Save Local", style: .secondary) {
+                    store.saveLocalRelaySettings(
+                        hostname: localHostnameDraft,
+                        bindHost: localBindHostDraft,
+                        port: localPortDraft
+                    )
+                }
                 CompactActionButton("Start Local", style: .primary) {
+                    store.saveLocalRelaySettings(
+                        hostname: localHostnameDraft,
+                        bindHost: localBindHostDraft,
+                        port: localPortDraft
+                    )
                     store.startLocalRelay()
                 }
                 CompactActionButton("Stop Local", style: .destructive) {
@@ -439,6 +490,25 @@ struct BridgeMenuBarContentView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private func localRelayField(title: String, text: Binding<String>, placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title.uppercased())
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
+            TextField(placeholder, text: text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color(nsColor: .textBackgroundColor).opacity(0.82), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

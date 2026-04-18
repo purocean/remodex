@@ -32,18 +32,27 @@ final class BridgeMenuBarStore: ObservableObject {
     @Published var cliAvailability: BridgeCLIAvailability = .checking
     @Published var relayOverride: String
     @Published var localRelayURL: String?
+    @Published var localRelayHostname: String
+    @Published var localRelayBindHost: String
+    @Published var localRelayPort: String
     @Published var isRefreshing = false
     @Published var isPerformingAction = false
     @Published var transientMessage = ""
     @Published var errorMessage = ""
 
     private static let relayOverrideKey = "remodex.menuBar.relayOverride"
+    private static let localRelayHostnameKey = "remodex.menuBar.localRelay.hostname"
+    private static let localRelayBindHostKey = "remodex.menuBar.localRelay.bindHost"
+    private static let localRelayPortKey = "remodex.menuBar.localRelay.port"
     private let service: BridgeControlService
     private var refreshLoopTask: Task<Void, Never>?
 
     init(service: BridgeControlService? = nil) {
         self.service = service ?? BridgeControlService()
         self.relayOverride = UserDefaults.standard.string(forKey: Self.relayOverrideKey) ?? ""
+        self.localRelayHostname = UserDefaults.standard.string(forKey: Self.localRelayHostnameKey) ?? ""
+        self.localRelayBindHost = UserDefaults.standard.string(forKey: Self.localRelayBindHostKey) ?? "0.0.0.0"
+        self.localRelayPort = UserDefaults.standard.string(forKey: Self.localRelayPortKey) ?? "9000"
         startRefreshLoop()
 
         Task {
@@ -83,6 +92,16 @@ final class BridgeMenuBarStore: ObservableObject {
         }
     }
 
+    func saveLocalRelaySettings(hostname: String, bindHost: String, port: String) {
+        localRelayHostname = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
+        localRelayBindHost = bindHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        localRelayPort = port.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        UserDefaults.standard.set(localRelayHostname, forKey: Self.localRelayHostnameKey)
+        UserDefaults.standard.set(localRelayBindHost, forKey: Self.localRelayBindHostKey)
+        UserDefaults.standard.set(localRelayPort, forKey: Self.localRelayPortKey)
+    }
+
     func startBridge() {
         let previousPairingDate = snapshot?.pairingSession?.createdDate
         runAction(successMessage: "Bridge avviato.") {
@@ -102,7 +121,12 @@ final class BridgeMenuBarStore: ObservableObject {
 
     func startLocalRelay() {
         runAction(successMessage: "Local relay started.") {
-            let relayURL = try await self.service.startLocalRelay()
+            try self.validateLocalRelaySettings()
+            let relayURL = try await self.service.startLocalRelay(
+                hostnameOverride: self.localRelayHostname,
+                bindHostOverride: self.localRelayBindHost,
+                portOverride: self.validatedLocalRelayPort
+            )
             self.localRelayURL = relayURL
             self.relayOverride = relayURL
             UserDefaults.standard.set(relayURL, forKey: Self.relayOverrideKey)
@@ -191,6 +215,28 @@ final class BridgeMenuBarStore: ObservableObject {
 
     private var effectiveRelayOverride: String? {
         relayOverride.isEmpty ? nil : relayOverride
+    }
+
+    private var validatedLocalRelayPort: Int? {
+        let trimmed = localRelayPort.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return 9000
+        }
+
+        guard let port = Int(trimmed), (1...65535).contains(port) else {
+            return nil
+        }
+
+        return port
+    }
+
+    private func validateLocalRelaySettings() throws {
+        guard validatedLocalRelayPort != nil else {
+            throw BridgeControlError.commandFailed(
+                command: "run-local-remodex.sh",
+                message: "Relay port must be an integer between 1 and 65535."
+            )
+        }
     }
 
     var isLocalRelayRunning: Bool {

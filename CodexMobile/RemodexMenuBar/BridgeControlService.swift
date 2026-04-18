@@ -179,7 +179,7 @@ final class BridgeControlService {
         _ = try await runner.run(command: "npm install -g remodex@latest")
     }
 
-    func startLocalRelay() async throws -> String {
+    func startLocalRelay(hostnameOverride: String?, bindHostOverride: String?, portOverride: Int?) async throws -> String {
         if let localRelayProcess, localRelayProcess.isRunning, let localRelayURL {
             return localRelayURL
         }
@@ -193,14 +193,18 @@ final class BridgeControlService {
             )
         }
 
-        guard let hostname = preferredLANIPAddress() else {
+        let hostname = normalizeNonEmptyString(hostnameOverride) ?? preferredLANIPAddress()
+        guard let hostname else {
             throw BridgeControlError.commandFailed(
                 command: launcherURL.path,
                 message: "Could not determine a LAN IP address for this Mac."
             )
         }
 
-        let relayURL = "ws://\(hostname):9000/relay"
+        let bindHost = normalizeNonEmptyString(bindHostOverride) ?? "0.0.0.0"
+        let port = portOverride ?? 9000
+
+        let relayURL = "ws://\(hostname):\(port)/relay"
         let logsDirectoryURL = defaultStateDirectory.appendingPathComponent("menu-bar-logs", isDirectory: true)
         try fileManager.createDirectory(at: logsDirectoryURL, withIntermediateDirectories: true)
 
@@ -215,7 +219,10 @@ final class BridgeControlService {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-lc", "exec ./run-local-remodex.sh --hostname \(shellQuoted(hostname))"]
+        process.arguments = [
+            "-lc",
+            "exec ./run-local-remodex.sh --hostname \(shellQuoted(hostname)) --bind-host \(shellQuoted(bindHost)) --port \(port)"
+        ]
         process.currentDirectoryURL = repoRootURL
         process.environment = ProcessInfo.processInfo.environment
         process.standardOutput = try FileHandle(forWritingTo: stdoutURL)
@@ -232,7 +239,7 @@ final class BridgeControlService {
         localRelayURL = relayURL
 
         do {
-            try await waitForLocalRelayHealthcheck()
+            try await waitForLocalRelayHealthcheck(port: port, bindHost: bindHost)
         } catch {
             stopLocalRelay()
             throw error
@@ -613,7 +620,17 @@ final class BridgeControlService {
             .deletingLastPathComponent()
     }
 
-    private func waitForLocalRelayHealthcheck() async throws {
+    private func waitForLocalRelayHealthcheck(port: Int, bindHost: String) async throws {
+        let probeHost: String
+        switch bindHost {
+        case "", "0.0.0.0":
+            probeHost = "127.0.0.1"
+        case "::":
+            probeHost = "[::1]"
+        default:
+            probeHost = bindHost
+        }
+
         for _ in 0..<20 {
             if let localRelayProcess, !localRelayProcess.isRunning {
                 throw BridgeControlError.commandFailed(
@@ -622,7 +639,7 @@ final class BridgeControlService {
                 )
             }
 
-            if let probeResult = try? await runner.run(command: "curl --silent --fail http://127.0.0.1:9000/health"),
+            if let probeResult = try? await runner.run(command: "curl --silent --fail http://\(probeHost):\(port)/health"),
                !probeResult.stdout.isEmpty || probeResult.exitCode == 0 {
                 return
             }
@@ -632,7 +649,7 @@ final class BridgeControlService {
 
         throw BridgeControlError.commandFailed(
             command: "./run-local-remodex.sh",
-            message: "The local relay did not become healthy on port 9000."
+            message: "The local relay did not become healthy on port \(port)."
         )
     }
 
